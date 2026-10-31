@@ -60,7 +60,8 @@ service này nằm ở `ai-service.base-url` trong `application-dev.yaml`
 ## Cài đặt
 
 ```powershell
-cd ai-service
+git clone https://github.com/SnapVocab/snap-vocab-ai.git
+cd snap-vocab-ai
 py -3.10 -m venv .venv
 .venv\Scripts\pip.exe install --upgrade pip
 
@@ -353,7 +354,7 @@ khởi động; nếu mạng chặn, tải thủ công vào thư mục `nltk_dat
 ## Cấu trúc thư mục
 
 ```
-ai-service/
+snap-vocab-ai/
 ├── app/
 │   ├── main.py              # FastAPI app, nạp model lúc startup
 │   ├── engines.py           # Giữ singleton Florence-2 / CLIP
