@@ -50,6 +50,19 @@ def _warn_on_suspicious_config(settings: Settings) -> None:
         )
 
 
+async def _load_models(app: FastAPI, engines: Engines) -> None:
+    # Model loading is synchronous/CPU-and-GPU-bound; run it off the event loop so
+    # the process can still answer /ping and /health while weights are loading.
+    try:
+        await asyncio.get_running_loop().run_in_executor(None, engines.load_all)
+    except Exception:
+        logger.exception("Model loading failed")
+        app.state.load_failed = True
+        return
+    app.state.models_ready = True
+    logger.info("Models loaded, ready to serve.")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
@@ -60,10 +73,9 @@ async def lifespan(app: FastAPI):
     app.state.engines = engines
     app.state.inference_slot = asyncio.Semaphore(max(1, settings.max_concurrent_requests))
     logger.info("Loading models on device=%s ...", engines.device)
-    # Model loading is synchronous/CPU-and-GPU-bound; run it off the event loop so
-    # the process can still answer /health while weights are downloading/loading.
-    await asyncio.get_running_loop().run_in_executor(None, engines.load_all)
-    logger.info("Models loaded, ready to serve.")
+    # Uvicorn only accepts connections after startup, so awaiting the load here
+    # would leave a load balancer's health check with nothing to talk to.
+    app.state.load_task = asyncio.create_task(_load_models(app, engines))
     yield
 
 
@@ -79,6 +91,8 @@ def create_app() -> FastAPI:
     install_error_handlers(app)
     app.state.settings = settings
     app.state.engines = None
+    app.state.models_ready = False
+    app.state.load_failed = False
     app.state.inference_slot = asyncio.Semaphore(max(1, settings.max_concurrent_requests))
     app.include_router(router)
     return app

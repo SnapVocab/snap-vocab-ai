@@ -6,7 +6,7 @@ import time
 import uuid
 
 import torch
-from fastapi import APIRouter, Depends, Header, Request, UploadFile
+from fastapi import APIRouter, Depends, Header, Request, Response, UploadFile
 from PIL import Image
 
 from app import errors
@@ -29,6 +29,14 @@ def require_service_token(
         return
     if not x_service_token or not hmac.compare_digest(x_service_token, expected):
         raise ServiceError(401, errors.UNAUTHORIZED, "Missing or invalid X-Service-Token.")
+
+
+@router.get("/ping")
+def ping(request: Request) -> Response:
+    """Health check for RunPod's load balancer: 200 ready, 204 initializing, other unhealthy."""
+    if request.app.state.load_failed:
+        return Response(status_code=503)
+    return Response(status_code=200 if request.app.state.models_ready else 204)
 
 
 @router.get("/health", response_model=HealthResponse)

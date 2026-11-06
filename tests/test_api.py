@@ -3,6 +3,8 @@
 The backend branches on `error.code`, so these pin the codes, not just statuses.
 """
 import io
+import threading
+import time
 import unittest
 from unittest.mock import Mock, patch
 
@@ -113,6 +115,35 @@ class DetectApiTests(unittest.TestCase):
         self.assertEqual(body["status"], "ok")
         self.assertEqual(body["model_version"], self.app.state.settings.model_version)
         self.assertIn("gpu_available", body)
+
+    def test_ping_follows_model_loading(self):
+        self.assertEqual(self.client.get("/ping").status_code, 204)
+
+        self.app.state.models_ready = True
+        self.assertEqual(self.client.get("/ping").status_code, 200)
+
+        self.app.state.models_ready = False
+        self.app.state.load_failed = True
+        self.assertEqual(self.client.get("/ping").status_code, 503)
+
+    def test_startup_answers_ping_while_models_load_then_reports_failure(self):
+        release = threading.Event()
+        engines = Mock()
+        engines.device = "cpu"
+
+        def load_all():
+            release.wait(5)
+            raise RuntimeError("no weights")
+
+        engines.load_all = load_all
+        with patch("app.main.Engines", return_value=engines), TestClient(create_app()) as client:
+            self.assertEqual(client.get("/ping").status_code, 204)
+            release.set()
+            for _ in range(100):
+                if client.get("/ping").status_code == 503:
+                    break
+                time.sleep(0.02)
+            self.assertEqual(client.get("/ping").status_code, 503)
 
 
 if __name__ == "__main__":
