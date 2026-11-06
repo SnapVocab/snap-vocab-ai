@@ -96,8 +96,11 @@ báo `"status": "ok"`.
 ```
 
 Model được nạp **một lần lúc khởi động** (không nạp lại mỗi request). Trong lúc
-đang nạp, `/health` vẫn trả lời nhưng với `"status": "loading"`, và
-`/api/v1/detect` trả `503`.
+đang nạp, `/health` vẫn trả lời nhưng với `"status": "loading"`, `/ping` trả `204`
+(xong thì `200`, nạp lỗi thì `503`) và `/api/v1/detect` trả `503`.
+
+Chạy trên RunPod Serverless (endpoint dạng load-balancing): image đóng sẵn model,
+cấu hình đặt trên endpoint theo `.env.serverless`, thêm `SERVICE_TOKEN`.
 
 Hoặc chạy bằng Docker (máy có GPU, cần NVIDIA Container Toolkit):
 
