@@ -5,20 +5,31 @@ import logging
 import time
 import uuid
 
+import requests
 import torch
 from fastapi import APIRouter, Depends, Header, Request, Response, UploadFile
 from PIL import Image
 
 from app import errors
+from app.config import Settings
 from app.errors import ServiceError
 from app.pipeline.pipeline import encode_base64, process_image
-from app.schemas import BoundingBox, Detection, DetectResponse, ErrorResponse, HealthResponse
+from app.schemas import (
+    BoundingBox,
+    Detection,
+    DetectResponse,
+    DetectUrlRequest,
+    ErrorResponse,
+    HealthResponse,
+)
 
 logger = logging.getLogger("ai-service")
 
 router = APIRouter()
 
 ALLOWED_TYPES = {"image/jpeg", "image/png", "image/webp"}
+ALLOWED_FORMATS = {"JPEG", "PNG", "WEBP"}
+GENERIC_BINARY_TYPES = {"application/octet-stream", "binary/octet-stream"}
 
 
 def require_service_token(
@@ -53,28 +64,44 @@ def health(request: Request) -> HealthResponse:
     )
 
 
-@router.post(
-    "/api/v1/detect",
-    response_model=DetectResponse,
-    dependencies=[Depends(require_service_token)],
-    responses={code: {"model": ErrorResponse} for code in (400, 401, 413, 415, 500, 503)},
-)
-async def detect(
+def _fetch_url_sync(image_url: str, timeout_s: float) -> requests.Response:
+    return requests.get(image_url, timeout=timeout_s, allow_redirects=True)
+
+
+async def _download_image(image_url: str, settings: Settings) -> bytes:
+    if not image_url.startswith(("http://", "https://")):
+        raise ServiceError(400, errors.INVALID_REQUEST, "image_url must be an HTTP or HTTPS URL.")
+
+    loop = asyncio.get_running_loop()
+    try:
+        resp = await loop.run_in_executor(
+            None, _fetch_url_sync, image_url, settings.image_download_timeout_s,
+        )
+    except requests.RequestException as exc:
+        raise ServiceError(502, errors.MODEL_ERROR, "Failed to download image from storage.") from exc
+
+    if resp.status_code != 200:
+        raise ServiceError(
+            502, errors.MODEL_ERROR, f"Storage returned HTTP {resp.status_code} when downloading image.",
+        )
+
+    headers = resp.headers or {}
+    content_type = next((v for k, v in headers.items() if k.lower() == "content-type"), "")
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    if media_type and media_type not in GENERIC_BINARY_TYPES and media_type not in ALLOWED_TYPES:
+        raise ServiceError(415, errors.INVALID_IMAGE, f"Unsupported content type: {content_type}")
+
+    return resp.content
+
+
+async def _run_detection_on_bytes(
     request: Request,
-    file: UploadFile,
-    x_request_id: str | None = Header(default=None),
+    raw: bytes,
+    request_id: str,
 ) -> DetectResponse:
-    request_id = x_request_id or uuid.uuid4().hex
     engines = request.app.state.engines
     settings = request.app.state.settings
 
-    if not engines or not engines.florence.loaded:
-        raise ServiceError(503, errors.MODEL_NOT_READY, "Models are still loading, try again shortly.")
-
-    if file.content_type not in ALLOWED_TYPES:
-        raise ServiceError(415, errors.INVALID_IMAGE, f"Unsupported content type: {file.content_type}")
-
-    raw = await file.read()
     if len(raw) > settings.max_upload_mb * 1024 * 1024:
         raise ServiceError(413, errors.INVALID_IMAGE, f"Image exceeds {settings.max_upload_mb}MB limit.")
 
@@ -83,6 +110,9 @@ async def detect(
         image.load()
     except Exception as exc:
         raise ServiceError(400, errors.INVALID_IMAGE, "Could not decode image.") from exc
+
+    if (image.format or "").upper() not in ALLOWED_FORMATS:
+        raise ServiceError(415, errors.INVALID_IMAGE, f"Unsupported image format: {image.format}")
 
     # process_image blocks for tens of seconds. Running it inline would freeze
     # the event loop for that whole time, so /health would hang and no other
@@ -129,3 +159,49 @@ async def detect(
         image_width=result.width,
         image_height=result.height,
     )
+
+
+@router.post(
+    "/api/v1/detect",
+    response_model=DetectResponse,
+    dependencies=[Depends(require_service_token)],
+    responses={code: {"model": ErrorResponse} for code in (400, 401, 413, 415, 500, 503)},
+)
+async def detect(
+    request: Request,
+    file: UploadFile,
+    x_request_id: str | None = Header(default=None),
+) -> DetectResponse:
+    request_id = x_request_id or uuid.uuid4().hex
+    engines = request.app.state.engines
+
+    if not engines or not engines.florence.loaded:
+        raise ServiceError(503, errors.MODEL_NOT_READY, "Models are still loading, try again shortly.")
+
+    if file.content_type not in ALLOWED_TYPES:
+        raise ServiceError(415, errors.INVALID_IMAGE, f"Unsupported content type: {file.content_type}")
+
+    raw = await file.read()
+    return await _run_detection_on_bytes(request, raw, request_id)
+
+
+@router.post(
+    "/api/v1/detect-url",
+    response_model=DetectResponse,
+    dependencies=[Depends(require_service_token)],
+    responses={code: {"model": ErrorResponse} for code in (400, 401, 413, 415, 500, 502, 503)},
+)
+async def detect_by_url(
+    request: Request,
+    body: DetectUrlRequest,
+    x_request_id: str | None = Header(default=None),
+) -> DetectResponse:
+    request_id = x_request_id or uuid.uuid4().hex
+    engines = request.app.state.engines
+    settings = request.app.state.settings
+
+    if not engines or not engines.florence.loaded:
+        raise ServiceError(503, errors.MODEL_NOT_READY, "Models are still loading, try again shortly.")
+
+    raw = await _download_image(body.image_url, settings)
+    return await _run_detection_on_bytes(request, raw, request_id)
