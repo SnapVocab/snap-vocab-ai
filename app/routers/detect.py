@@ -16,12 +16,15 @@ from app.errors import ServiceError
 from app.pipeline.pipeline import encode_base64, process_image
 from app.schemas import (
     BoundingBox,
+    DetectAsyncRequest,
+    DetectAsyncResponse,
     Detection,
     DetectResponse,
     DetectUrlRequest,
     ErrorResponse,
     HealthResponse,
 )
+from app.webhook import send_webhook
 
 logger = logging.getLogger("ai-service")
 
@@ -95,12 +98,12 @@ async def _download_image(image_url: str, settings: Settings) -> bytes:
 
 
 async def _run_detection_on_bytes(
-    request: Request,
+    app,
     raw: bytes,
     request_id: str,
 ) -> DetectResponse:
-    engines = request.app.state.engines
-    settings = request.app.state.settings
+    engines = app.state.engines
+    settings = app.state.settings
 
     if len(raw) > settings.max_upload_mb * 1024 * 1024:
         raise ServiceError(413, errors.INVALID_IMAGE, f"Image exceeds {settings.max_upload_mb}MB limit.")
@@ -120,7 +123,7 @@ async def _run_detection_on_bytes(
     # let the semaphore keep concurrent inference off the device (two requests
     # at once do not go faster, they just compete for VRAM).
     loop = asyncio.get_running_loop()
-    async with request.app.state.inference_slot:
+    async with app.state.inference_slot:
         started = time.perf_counter()
         try:
             result = await loop.run_in_executor(
@@ -182,7 +185,7 @@ async def detect(
         raise ServiceError(415, errors.INVALID_IMAGE, f"Unsupported content type: {file.content_type}")
 
     raw = await file.read()
-    return await _run_detection_on_bytes(request, raw, request_id)
+    return await _run_detection_on_bytes(request.app, raw, request_id)
 
 
 @router.post(
@@ -204,4 +207,77 @@ async def detect_by_url(
         raise ServiceError(503, errors.MODEL_NOT_READY, "Models are still loading, try again shortly.")
 
     raw = await _download_image(body.image_url, settings)
-    return await _run_detection_on_bytes(request, raw, request_id)
+    return await _run_detection_on_bytes(request.app, raw, request_id)
+
+
+async def _execute_async_detection(app, body: DetectAsyncRequest) -> None:
+    settings = app.state.settings
+    try:
+        try:
+            raw = await _download_image(body.image_url, settings)
+            result = await _run_detection_on_bytes(app, raw, body.request_id)
+            payload = {
+                "request_id": body.request_id,
+                "status": "DONE",
+                "model_version": result.model_version,
+                "processing_time_ms": result.processing_time_ms,
+                "image_width": result.image_width,
+                "image_height": result.image_height,
+                "detections": [d.model_dump() for d in result.detections],
+            }
+        except ServiceError as exc:
+            logger.warning("request_id=%s async detection failed: %s %s", body.request_id, exc.code, exc.message)
+            payload = {
+                "request_id": body.request_id,
+                "status": "FAILED",
+                "error_code": exc.code,
+                "error_message": exc.message,
+            }
+        except Exception:
+            logger.exception("request_id=%s async detection crashed unexpectedly", body.request_id)
+            payload = {
+                "request_id": body.request_id,
+                "status": "FAILED",
+                "error_code": errors.MODEL_ERROR,
+                "error_message": "Detection failed inside the model.",
+            }
+
+        try:
+            await send_webhook(body.callback_url, payload, settings)
+        except Exception:
+            logger.exception("request_id=%s failed while delivering webhook", body.request_id)
+    finally:
+        app.state.pending_jobs = max(0, getattr(app.state, "pending_jobs", 1) - 1)
+
+
+@router.post(
+    "/api/v1/detect-async",
+    response_model=DetectAsyncResponse,
+    status_code=202,
+    dependencies=[Depends(require_service_token)],
+    responses={code: {"model": ErrorResponse} for code in (400, 401, 503)},
+)
+async def detect_async(
+    request: Request,
+    body: DetectAsyncRequest,
+) -> DetectAsyncResponse:
+    engines = request.app.state.engines
+    settings = request.app.state.settings
+
+    if not engines or not engines.florence.loaded:
+        raise ServiceError(503, errors.MODEL_NOT_READY, "Models are still loading, try again shortly.")
+
+    if not body.image_url.startswith(("http://", "https://")) or not body.callback_url.startswith(("http://", "https://")):
+        raise ServiceError(400, errors.INVALID_REQUEST, "image_url and callback_url must be HTTP or HTTPS URLs.")
+
+    if getattr(request.app.state, "pending_jobs", 0) >= settings.max_queue_size:
+        raise ServiceError(503, errors.QUEUE_FULL, "Detection queue is full, try again shortly.")
+
+    request.app.state.pending_jobs = getattr(request.app.state, "pending_jobs", 0) + 1
+    task = asyncio.create_task(_execute_async_detection(request.app, body))
+    tasks = getattr(request.app.state, "background_tasks", None)
+    if tasks is not None:
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+
+    return DetectAsyncResponse(request_id=body.request_id, status="QUEUED")

@@ -17,6 +17,7 @@ INVALID_REQUEST = "INVALID_REQUEST"      # 400: malformed request (e.g. no `file
 INVALID_IMAGE = "INVALID_IMAGE"          # 400/413/415: unsupported type, too large, undecodable
 UNAUTHORIZED = "UNAUTHORIZED"            # 401: missing or wrong X-Service-Token
 MODEL_NOT_READY = "MODEL_NOT_READY"      # 503: models still loading, retry shortly
+QUEUE_FULL = "QUEUE_FULL"                # 503: async queue is full
 MODEL_ERROR = "MODEL_ERROR"              # 500: inference blew up
 
 

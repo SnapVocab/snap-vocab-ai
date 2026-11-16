@@ -16,6 +16,11 @@ class Settings(BaseSettings):
     cors_origins: list[str] = []
     max_upload_mb: int = 10
     image_download_timeout_s: float = 15.0
+    webhook_secret: str | None = None
+    webhook_timeout_s: float = 10.0
+    webhook_max_retries: int = 3
+    webhook_retry_delay_s: float = 1.0
+    max_queue_size: int = 4
 
     # When set, /api/v1/detect requires a matching X-Service-Token header.
     # Leave empty only when the service is unreachable from outside the backend's network.
@@ -113,6 +118,10 @@ class Settings(BaseSettings):
     # for kernel init and cuDNN autotuning; without this the first real request
     # absorbs that cost.
     warmup_on_load: bool = True
+
+    @property
+    def effective_webhook_secret(self) -> str | None:
+        return self.webhook_secret or self.service_token
 
     @property
     def needs_clip(self) -> bool:
