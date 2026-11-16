@@ -72,6 +72,8 @@ async def lifespan(app: FastAPI):
     engines = Engines(settings)
     app.state.engines = engines
     app.state.inference_slot = asyncio.Semaphore(max(1, settings.max_concurrent_requests))
+    app.state.pending_jobs = 0
+    app.state.background_tasks = set()
     logger.info("Loading models on device=%s ...", engines.device)
     # Uvicorn only accepts connections after startup, so awaiting the load here
     # would leave a load balancer's health check with nothing to talk to.
@@ -94,6 +96,8 @@ def create_app() -> FastAPI:
     app.state.models_ready = False
     app.state.load_failed = False
     app.state.inference_slot = asyncio.Semaphore(max(1, settings.max_concurrent_requests))
+    app.state.pending_jobs = 0
+    app.state.background_tasks = set()
     app.include_router(router)
     return app
 
