@@ -28,6 +28,10 @@ class Detection(BaseModel):
     )
 
 
+class DetectUrlRequest(BaseModel):
+    image_url: str = Field(min_length=1, description="Presigned GET URL of the image in object storage")
+
+
 class DetectResponse(BaseModel):
     request_id: str | None = Field(default=None, description="Echo of the X-Request-Id header")
     model_version: str = Field(default="", description="Florence-2 model and enabled stages")

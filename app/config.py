@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     # need CORS here. Add origins only for a local debugging UI.
     cors_origins: list[str] = []
     max_upload_mb: int = 10
+    image_download_timeout_s: float = 15.0
 
     # When set, /api/v1/detect requires a matching X-Service-Token header.
     # Leave empty only when the service is unreachable from outside the backend's network.
