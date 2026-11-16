@@ -32,6 +32,17 @@ class DetectUrlRequest(BaseModel):
     image_url: str = Field(min_length=1, description="Presigned GET URL of the image in object storage")
 
 
+class DetectAsyncRequest(BaseModel):
+    request_id: str = Field(min_length=1, description="Scan request ID echoed in the webhook callback")
+    image_url: str = Field(min_length=1, description="Presigned GET URL of the image in object storage")
+    callback_url: str = Field(min_length=1, description="Backend webhook URL to receive the detection result")
+
+
+class DetectAsyncResponse(BaseModel):
+    request_id: str
+    status: Literal["QUEUED"] = "QUEUED"
+
+
 class DetectResponse(BaseModel):
     request_id: str | None = Field(default=None, description="Echo of the X-Request-Id header")
     model_version: str = Field(default="", description="Florence-2 model and enabled stages")
